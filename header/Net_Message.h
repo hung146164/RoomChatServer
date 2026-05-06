@@ -1,5 +1,5 @@
 #pragma one
-#include "NetCommon.h"
+#include "Net_Common.h"
 
 namespace olc
 {
