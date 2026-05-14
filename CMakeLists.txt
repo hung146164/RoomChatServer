@@ -8,3 +8,4 @@ include_directories(header)
 
 add_executable(server ./src/server.cpp)
 add_executable(client ./src/client.cpp)
+add_executable(client2 ./src/client2.cpp)
