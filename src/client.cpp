@@ -2,7 +2,7 @@
 
 int NUM_BOTS = 100;
 int PORT = 8080;
-char *SERVER_IP = "8.8.8.8";
+char *SERVER_IP = "127.0.0.1";
 
 void LoadConfig()
 {

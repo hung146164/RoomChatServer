@@ -6,5 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(header)
 
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/.env ${CMAKE_CURRENT_BINARY_DIR}/.env COPYONLY)
+
 add_executable(server ./src/server.cpp)
 add_executable(client ./src/client.cpp)
+add_executable(client2 ./src/client2.cpp)
