@@ -1,32 +1,66 @@
 #include "../header/networkcommon.h"
 
-int main()
+int NUM_BOTS = 100;
+const int PORT = 8888;
+const char *SERVER_IP = "127.0.0.1";
+void BotTask(int botId)
 {
     int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
 
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_port = htons(PORT);
     serverAddress.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    const char *message = "hello world";
     if (connect(clientSocket, (sockaddr *)&serverAddress, sizeof(serverAddress)) < 0)
     {
         std::cout << "Connect Failed" << '\n';
         close(clientSocket);
-        return 1;
+        return;
     }
-    while (true)
+    for (int i = 1; i <= 5; ++i)
     {
-        char s[1024];
+        std::string msg = "Hello from Bot " + std::to_string(botId) + " - Message " + std::to_string(i);
+        auto start = std::chrono::high_resolution_clock::now();
+        int byteSend = send(clientSocket, msg.c_str(), msg.length(), 0);
 
-        std::cout << "What you want to sent: " << '\n';
-        std::cin.getline(s, 1024);
-
-        int byteSend = send(clientSocket, s, strlen(s), 0);
-        if (byteSend == 0)
+        if (byteSend <= 0)
+        {
+            std::cerr << "[Bot " << botId << "] Connection lost.\n";
             break;
-        std::cout << "Send success " << byteSend << "Byte" << '\n';
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        char buffer[1024];
+        int bytesReceived = recv(clientSocket, buffer, 1024, 0);
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+        std::cout << "[Bot " << botId << "] Sent " << byteSend
+                  << " bytes. Latency: " << duration.count() << " us\n";
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
     close(clientSocket);
+}
+int main()
+{
+    std::cout << "Start Test entor your number bot: " << '\n';
+    std::cin >> NUM_BOTS;
+
+    std::vector<std::thread> botThreads;
+
+    for (int i = 0; i < NUM_BOTS; i++)
+    {
+        botThreads.push_back(std::thread(BotTask, i));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    for (auto &t : botThreads)
+    {
+        if (t.joinable())
+        {
+            t.join();
+        }
+    }
+    std::cout << "Complete" << '\n';
+    return 0;
 }

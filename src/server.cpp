@@ -100,10 +100,10 @@ int main()
         return 1;
     }
 
-    struct epoll_event ev;                 // dùng để thêm socket
-    struct epoll_event events[MAX_EVENTS]; // mảng chứa các sự kiện khi epoll wait chạy xong
+    struct epoll_event ev;
+    struct epoll_event events[MAX_EVENTS];
 
-    ev.events = EPOLLIN; // lắng nghe các sự kiện có thể đọc
+    ev.events = EPOLLIN;
     ev.data.fd = clientdetail->serverfd;
 
     // đăng ký add vào bảng
@@ -139,7 +139,7 @@ int main()
                     if (clientdetail->currentConnections >= MAX_PLAYERS)
                     {
                         const char *rejectMsg = "Server is full! Please try again later.\n";
-                        write(new_fd, rejectMsg, strlen(rejectMsg)); // Báo cho client biết
+                        write(new_fd, rejectMsg, strlen(rejectMsg));
                         close(new_fd);
                         std::cout << "Rejected player at fd " << new_fd << " due to max capacity.\n";
                         continue;
@@ -186,6 +186,13 @@ int main()
                 {
                     message[valread] = '\0';
                     std::cout << "message from " << current_fd << ": " << message << '\n';
+
+                    int bytesSent = send(current_fd, message, valread, MSG_NOSIGNAL);
+
+                    if (bytesSent < 0)
+                    {
+                        std::cerr << "Failed to send echo back to " << current_fd << '\n';
+                    }
                 }
             }
         }
