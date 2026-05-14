@@ -1,9 +1,7 @@
 name: CI/CD Game Server
-
 on:
   push:
     branches: [ "develop" ] 
-
 jobs:
   
   build-and-push:
