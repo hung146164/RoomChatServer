@@ -42,7 +42,7 @@ jobs:
             echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
             
-            docker pull ghcr.io/${{ github.repository }}:latest
+            docker pull ghcr.io/${{ roomchatserver }}:latest
             
             
             docker stop roomchat || true
@@ -54,4 +54,4 @@ jobs:
               -p 8080:8080 \
               --ulimit nofile=100000:100000 \
               --restart always \
-              ghcr.io/${{ github.repository }}:latest
+              ghcr.io/${{ roomchatserver }}:latest
