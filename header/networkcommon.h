@@ -11,3 +11,8 @@
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#include <fcntl.h>
+#include <map>
+#include <numeric>
+#include <algorithm>
+#include <cmath>
