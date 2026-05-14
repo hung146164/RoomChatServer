@@ -5,17 +5,22 @@ const int port = 8080;
 
 // room config
 const int listenSize = 5;
+const int MAX_EVENTS = 10;
+const int MAX_FDS = 100000;
 
-//
+const int MAX_PLAYERS = 1000;
 struct ClientDetail
 {
     int32_t serverfd;
     int32_t currentClientfd;
-    std::vector<int32_t> clientfdList;
+    int32_t currentConnections;
+    std::vector<bool> isConnected;
     ClientDetail()
     {
         serverfd = -1;
         currentClientfd = -1;
+        currentConnections = 0;
+        isConnected.resize(MAX_FDS, 0);
     }
 };
 bool ConfigServerfd(ClientDetail *clientDetail)
@@ -88,82 +93,115 @@ int main()
         return 1;
     }
 
-    fd_set readfd;
-    int maxfd;
-    int activity;
+    int epollfd = epoll_create1(0);
+    if (epollfd == -1)
+    {
+        std::cerr << "Create epoll failed" << '\n';
+        return 1;
+    }
+
+    struct epoll_event ev;                 // dùng để thêm socket
+    struct epoll_event events[MAX_EVENTS]; // mảng chứa các sự kiện khi epoll wait chạy xong
+
+    ev.events = EPOLLIN; // lắng nghe các sự kiện có thể đọc
+    ev.data.fd = clientdetail->serverfd;
+
+    // đăng ký add vào bảng
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientdetail->serverfd, &ev) == -1)
+    {
+        std::cerr << "Failed to add server to epoll'\n";
+    }
+
     while (true)
     {
-        FD_ZERO(&readfd);
-        // lắng nghe kết nối mới
-        FD_SET(clientdetail->serverfd, &readfd);
-
-        maxfd = clientdetail->serverfd;
-
-        // lắng nghe kết nối cũ
-        for (auto sd : clientdetail->clientfdList)
+        int nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+        if (nfds == -1)
         {
-            FD_SET(sd, &readfd);
-            if (maxfd < sd)
-            {
-                maxfd = sd;
-            }
-        }
-        activity = select(maxfd + 1, &readfd, NULL, NULL, NULL);
-
-        if (activity < 0)
-        {
+            std::cerr << "Epoll wait error!\n";
             continue;
         }
-        if (FD_ISSET(clientdetail->serverfd, &readfd))
+        for (int i = 0; i < nfds; i++)
         {
-            clientdetail->currentClientfd = accept(clientdetail->serverfd, NULL, NULL);
-            if (clientdetail->currentClientfd >= 0)
+            int current_fd = events[i].data.fd;
+            if (current_fd == clientdetail->serverfd)
             {
-                clientdetail->clientfdList.push_back(clientdetail->currentClientfd);
-                std::cout << "New client, socket fd id: " << clientdetail->currentClientfd << '\n';
+                clientdetail->currentClientfd = accept(clientdetail->serverfd, NULL, NULL);
+                if (clientdetail->currentClientfd >= 0)
+                {
+                    int new_fd = clientdetail->currentClientfd;
+
+                    if (new_fd >= MAX_FDS)
+                    {
+                        std::cerr << "FD limit reached, forcefully closing.\n";
+                        close(new_fd);
+                        continue;
+                    }
+                    if (clientdetail->currentConnections >= MAX_PLAYERS)
+                    {
+                        const char *rejectMsg = "Server is full! Please try again later.\n";
+                        write(new_fd, rejectMsg, strlen(rejectMsg)); // Báo cho client biết
+                        close(new_fd);
+                        std::cout << "Rejected player at fd " << new_fd << " due to max capacity.\n";
+                        continue;
+                    }
+                    std::cout << "New client socket id: " << clientdetail->currentClientfd << '\n';
+
+                    clientdetail->isConnected[new_fd] = true;
+                    clientdetail->currentConnections++;
+                    std::cout << "Current players online: " << clientdetail->currentConnections << "/" << MAX_PLAYERS << "\n";
+
+                    ev.events = EPOLLIN;
+                    ev.data.fd = clientdetail->currentClientfd;
+                    epoll_ctl(epollfd, EPOLL_CTL_ADD, clientdetail->currentClientfd, &ev);
+                }
+                else
+                {
+                    std::cerr << "Accepted failed" << '\n';
+                }
             }
             else
             {
-                std::cerr << "Accept failed!\n";
-            }
-        }
+                char message[1024];
+                int valread = read(current_fd, message, 1024);
 
-        char message[1024];
-        for (int i = clientdetail->clientfdList.size() - 1; i >= 0; i--)
-        {
-            int sd = clientdetail->clientfdList[i];
-
-            if (FD_ISSET(sd, &readfd))
-            {
-                int valread = read(sd, message, 1024);
-                if (valread == 0)
+                if (valread == 0 || valread < 0)
                 {
-                    std::cout << sd << " Disconnected!" << '\n';
-                    close(sd);
-                    clientdetail->clientfdList.erase(clientdetail->clientfdList.begin() + i);
-                    continue;
-                }
-                else if (valread < 0)
-                {
+                    if (valread == 0)
+                        std::cout << current_fd << " Disconnected!" << '\n';
+                    else
+                    {
+                        std::cerr << "Read error at " << current_fd << " force quit" << '\n';
+                    }
+                    epoll_ctl(epollfd, EPOLL_CTL_DEL, current_fd, NULL);
+                    close(current_fd);
 
-                    std::cerr << "Read error on fd " << sd << ". Force disconnect.\n";
-                    close(sd);
-                    clientdetail->clientfdList.erase(clientdetail->clientfdList.begin() + i);
+                    if (clientdetail->isConnected[current_fd])
+                    {
+                        clientdetail->isConnected[current_fd] = false;
+                        clientdetail->currentConnections--;
+                        std::cout << "Current players online: " << clientdetail->currentConnections << "/" << MAX_PLAYERS << "\n";
+                    }
                 }
                 else
                 {
                     message[valread] = '\0';
-                    std::cout << "Message received from " << sd << ": " << message << '\n';
+                    std::cout << "message from " << current_fd << ": " << message << '\n';
                 }
             }
         }
     }
-    close(clientdetail->serverfd);
-    for (auto sd : clientdetail->clientfdList)
-    {
-        close(sd);
-    }
-    delete clientdetail;
 
+    close(epollfd);
+    close(clientdetail->serverfd);
+
+    for (int i = 0; i < MAX_FDS; i++)
+    {
+        if (clientdetail->isConnected[i])
+        {
+            close(i);
+        }
+    }
+
+    delete clientdetail;
     return 0;
 }
