@@ -1,214 +1,119 @@
 #include "../header/networkcommon.h"
 
-// network config
-const int port = 8080;
+#include <iostream>
+#include <cstring>
+#include <vector>
+#include <unistd.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
+#include <sys/epoll.h>
 
-// room config
-const int listenSize = 5;
-const int MAX_EVENTS = 10;
-const int MAX_FDS = 100000;
+const int PORT = 8080;
+const int MAX_EVENTS = 1024;
+const int MAX_PLAYERS = 10000;
 
-const int MAX_PLAYERS = 1000;
-struct ClientDetail
+void setNonBlocking(int fd)
 {
-    int32_t serverfd;
-    int32_t currentClientfd;
-    int32_t currentConnections;
-    std::vector<bool> isConnected;
-    ClientDetail()
-    {
-        serverfd = -1;
-        currentClientfd = -1;
-        currentConnections = 0;
-        isConnected.resize(MAX_FDS, 0);
-    }
-};
-bool ConfigServerfd(ClientDetail *clientDetail)
-{
-    clientDetail->serverfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (clientDetail->serverfd <= 0)
-    {
-        std::cerr << "Create socket failed" << '\n';
-        return false;
-    }
-
-    std::cerr << "Socket created" << '\n';
-
-    int opt = 1;
-    if (setsockopt(clientDetail->serverfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-    {
-        std::cerr << "setsockopt(SO_REUSEADDR) failed" << '\n';
-    }
-    return true;
-}
-bool ConfigServerAddrAndBind(ClientDetail *clientDetail)
-{
-    sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(clientDetail->serverfd, (sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
-    {
-        std::cerr << "Bind error!" << '\n';
-        return false;
-    }
-    else
-    {
-        std::cerr << "Bind done!" << '\n';
-    }
-    return true;
-}
-bool StartListen(ClientDetail *clientDetail)
-{
-    if (listen(clientDetail->serverfd, listenSize) < 0)
-    {
-        std::cerr << "Listen failed!";
-        return false;
-    }
-    else
-    {
-        std::cerr << "Listen at port " << port << '\n';
-    }
-    return true;
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 int main()
 {
-    ClientDetail *clientdetail = new ClientDetail();
-    if (!ConfigServerfd(clientdetail))
-    {
-        delete clientdetail;
-        return 1;
-    }
-    if (!ConfigServerAddrAndBind(clientdetail))
-    {
-        close(clientdetail->serverfd);
-        delete clientdetail;
-        return 1;
-    }
-    if (!StartListen(clientdetail))
-    {
-        close(clientdetail->serverfd);
-        delete clientdetail;
-        return 1;
-    }
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    bind(server_fd, (sockaddr *)&addr, sizeof(addr));
+    listen(server_fd, 128);
+
+    setNonBlocking(server_fd);
 
     int epollfd = epoll_create1(0);
-    if (epollfd == -1)
-    {
-        std::cerr << "Create epoll failed" << '\n';
-        return 1;
-    }
 
-    struct epoll_event ev;
-    struct epoll_event events[MAX_EVENTS];
-
+    epoll_event ev{}, events[MAX_EVENTS];
     ev.events = EPOLLIN;
-    ev.data.fd = clientdetail->serverfd;
+    ev.data.fd = server_fd;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, server_fd, &ev);
 
-    // đăng ký add vào bảng
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientdetail->serverfd, &ev) == -1)
-    {
-        std::cerr << "Failed to add server to epoll'\n";
-    }
+    std::cout << "Server running...\n";
 
     while (true)
     {
         int nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
-        if (nfds == -1)
-        {
-            std::cerr << "Epoll wait error!\n";
-            continue;
-        }
+
         for (int i = 0; i < nfds; i++)
         {
-            int current_fd = events[i].data.fd;
-            if (current_fd == clientdetail->serverfd)
+            int fd = events[i].data.fd;
+
+            // ================= ACCEPT =================
+            if (fd == server_fd)
             {
-                clientdetail->currentClientfd = accept(clientdetail->serverfd, NULL, NULL);
-                if (clientdetail->currentClientfd >= 0)
+                while (true)
                 {
-                    int new_fd = clientdetail->currentClientfd;
+                    int client = accept(server_fd, nullptr, nullptr);
+                    if (client < 0)
+                        break;
 
-                    if (new_fd >= MAX_FDS)
+                    if (client >= MAX_PLAYERS)
                     {
-                        std::cerr << "FD limit reached, forcefully closing.\n";
-                        close(new_fd);
+                        close(client);
                         continue;
                     }
-                    if (clientdetail->currentConnections >= MAX_PLAYERS)
-                    {
-                        const char *rejectMsg = "Server is full! Please try again later.\n";
-                        write(new_fd, rejectMsg, strlen(rejectMsg));
-                        close(new_fd);
-                        std::cout << "Rejected player at fd " << new_fd << " due to max capacity.\n";
-                        continue;
-                    }
-                    std::cout << "New client socket id: " << clientdetail->currentClientfd << '\n';
 
-                    clientdetail->isConnected[new_fd] = true;
-                    clientdetail->currentConnections++;
-                    std::cout << "Current players online: " << clientdetail->currentConnections << "/" << MAX_PLAYERS << "\n";
+                    setNonBlocking(client);
 
-                    ev.events = EPOLLIN;
-                    ev.data.fd = clientdetail->currentClientfd;
-                    epoll_ctl(epollfd, EPOLL_CTL_ADD, clientdetail->currentClientfd, &ev);
-                }
-                else
-                {
-                    std::cerr << "Accepted failed" << '\n';
+                    epoll_event cev{};
+                    cev.events = EPOLLIN | EPOLLET;
+                    cev.data.fd = client;
+
+                    epoll_ctl(epollfd, EPOLL_CTL_ADD, client, &cev);
                 }
             }
+
+            // ================= CLIENT =================
             else
             {
-                char message[1024];
-                int valread = read(current_fd, message, 1024);
+                char buf[4096];
 
-                if (valread == 0 || valread < 0)
+                while (true)
                 {
-                    if (valread == 0)
-                        std::cout << current_fd << " Disconnected!" << '\n';
+                    int n = recv(fd, buf, sizeof(buf), 0);
+
+                    if (n > 0)
+                    {
+                        // echo back (FAST PATH)
+                        int sent = 0;
+                        while (sent < n)
+                        {
+                            int s = send(fd, buf + sent, n - sent, MSG_NOSIGNAL);
+                            if (s <= 0)
+                                break;
+                            sent += s;
+                        }
+                    }
+                    else if (n == 0)
+                    {
+                        close(fd);
+                        break;
+                    }
                     else
                     {
-                        std::cerr << "Read error at " << current_fd << " force quit" << '\n';
-                    }
-                    epoll_ctl(epollfd, EPOLL_CTL_DEL, current_fd, NULL);
-                    close(current_fd);
-
-                    if (clientdetail->isConnected[current_fd])
-                    {
-                        clientdetail->isConnected[current_fd] = false;
-                        clientdetail->currentConnections--;
-                        std::cout << "Current players online: " << clientdetail->currentConnections << "/" << MAX_PLAYERS << "\n";
-                    }
-                }
-                else
-                {
-                    message[valread] = '\0';
-                    std::cout << "message from " << current_fd << ": " << message << '\n';
-
-                    int bytesSent = send(current_fd, message, valread, MSG_NOSIGNAL);
-
-                    if (bytesSent < 0)
-                    {
-                        std::cerr << "Failed to send echo back to " << current_fd << '\n';
+                        if (errno == EAGAIN)
+                            break;
+                        close(fd);
+                        break;
                     }
                 }
             }
         }
     }
 
-    close(epollfd);
-    close(clientdetail->serverfd);
-
-    for (int i = 0; i < MAX_FDS; i++)
-    {
-        if (clientdetail->isConnected[i])
-        {
-            close(i);
-        }
-    }
-
-    delete clientdetail;
-    return 0;
+    close(server_fd);
 }
