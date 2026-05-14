@@ -1,27 +1,38 @@
+/* Author: HungForree */
 #include "../header/networkcommon.h"
-
-#include <iostream>
-#include <cstring>
-#include <vector>
-#include <unistd.h>
-#include <fcntl.h>
-#include <arpa/inet.h>
-#include <sys/epoll.h>
 
 const int PORT = 8080;
 const int MAX_EVENTS = 1024;
-const int MAX_PLAYERS = 10000;
+
+// Cấu trúc lưu trạng thái của từng Client
+struct Connection
+{
+    int fd;
+    std::string write_buffer;
+};
 
 void setNonBlocking(int fd)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+}
+
+void setTCPNoDelay(int fd)
+{
+    int opt = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+}
+
+// Hàm giải phóng tài nguyên gọn gàng
+void closeConnection(int epollfd, Connection *conn)
+{
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, conn->fd, nullptr);
+    close(conn->fd);
+    delete conn;
 }
 
 int main()
 {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -31,18 +42,20 @@ int main()
     addr.sin_addr.s_addr = INADDR_ANY;
 
     bind(server_fd, (sockaddr *)&addr, sizeof(addr));
-    listen(server_fd, 128);
+    listen(server_fd, SOMAXCONN); // Tối ưu: Dùng SOMAXCONN thay vì 128
 
     setNonBlocking(server_fd);
 
     int epollfd = epoll_create1(0);
 
     epoll_event ev{}, events[MAX_EVENTS];
-    ev.events = EPOLLIN;
-    ev.data.fd = server_fd;
+
+    // Server FD không cần buffer, ta nhét luôn fd vào con trỏ bằng ép kiểu
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.ptr = reinterpret_cast<void *>(server_fd);
     epoll_ctl(epollfd, EPOLL_CTL_ADD, server_fd, &ev);
 
-    std::cout << "Server running...\n";
+    std::cout << "[SYSTEM] Advanced Epoll Server running on port " << PORT << "...\n";
 
     while (true)
     {
@@ -50,70 +63,110 @@ int main()
 
         for (int i = 0; i < nfds; i++)
         {
-            int fd = events[i].data.fd;
-
-            // ================= ACCEPT =================
-            if (fd == server_fd)
+            // Kiểm tra xem event này là của server_fd hay của Client
+            if (events[i].data.ptr == reinterpret_cast<void *>(server_fd))
             {
+                // ================= ACCEPT LOOP =================
                 while (true)
                 {
-                    int client = accept(server_fd, nullptr, nullptr);
-                    if (client < 0)
-                        break;
+                    sockaddr_in client_addr{};
+                    socklen_t client_len = sizeof(client_addr);
+                    int client = accept(server_fd, (sockaddr *)&client_addr, &client_len);
 
-                    if (client >= MAX_PLAYERS)
+                    if (client < 0)
                     {
-                        close(client);
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            break;
                         continue;
                     }
 
                     setNonBlocking(client);
+                    setTCPNoDelay(client);
+
+                    // Khởi tạo trạng thái cho Client mới
+                    Connection *conn = new Connection{client, ""};
 
                     epoll_event cev{};
-                    cev.events = EPOLLIN | EPOLLET;
-                    cev.data.fd = client;
-
+                    cev.events = EPOLLIN | EPOLLET; // Chỉ chờ đọc lúc đầu
+                    cev.data.ptr = conn;
                     epoll_ctl(epollfd, EPOLL_CTL_ADD, client, &cev);
                 }
             }
-
-            // ================= CLIENT =================
             else
             {
-                char buf[4096];
+                // ================= CLIENT EVENT =================
+                Connection *conn = static_cast<Connection *>(events[i].data.ptr);
 
-                while (true)
+                if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
                 {
-                    int n = recv(fd, buf, sizeof(buf), 0);
+                    closeConnection(epollfd, conn);
+                    continue;
+                }
 
-                    if (n > 0)
+                // 1. NẾU CÓ DỮ LIỆU ĐẾN (EPOLLIN)
+                if (events[i].events & EPOLLIN)
+                {
+                    char buf[4096];
+                    while (true)
                     {
-                        // echo back (FAST PATH)
-                        int sent = 0;
-                        while (sent < n)
+                        int n = recv(conn->fd, buf, sizeof(buf), 0);
+                        if (n > 0)
                         {
-                            int s = send(fd, buf + sent, n - sent, MSG_NOSIGNAL);
-                            if (s <= 0)
+                            // Nhận được bao nhiêu, nhét hết vào buffer gửi đi
+                            conn->write_buffer.append(buf, n);
+                        }
+                        else if (n == 0)
+                        {
+                            closeConnection(epollfd, conn);
+                            goto next_event; // Thoát hẳn vòng lặp Client này
+                        }
+                        else
+                        {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
                                 break;
-                            sent += s;
+                            closeConnection(epollfd, conn);
+                            goto next_event;
                         }
                     }
-                    else if (n == 0)
+                }
+
+                // 2. XỬ LÝ GỬI DỮ LIỆU TỪ BUFFER (EPOLLOUT hoặc sau khi nhận)
+                if (!conn->write_buffer.empty())
+                {
+                    int sent = send(conn->fd, conn->write_buffer.data(), conn->write_buffer.size(), MSG_NOSIGNAL);
+
+                    if (sent > 0)
                     {
-                        close(fd);
-                        break;
+                        // Xóa phần đã gửi thành công khỏi buffer
+                        conn->write_buffer.erase(0, sent);
+                    }
+                    else if (sent < 0 && (errno != EAGAIN && errno != EWOULDBLOCK))
+                    {
+                        closeConnection(epollfd, conn);
+                        continue;
+                    }
+
+                    // Điều chỉnh cờ Epoll dựa trên trạng thái buffer
+                    epoll_event cev{};
+                    cev.data.ptr = conn;
+                    if (!conn->write_buffer.empty())
+                    {
+                        // Gửi chưa hết (EAGAIN), đăng ký thêm EPOLLOUT để OS gọi lại
+                        cev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                        epoll_ctl(epollfd, EPOLL_CTL_MOD, conn->fd, &cev);
                     }
                     else
                     {
-                        if (errno == EAGAIN)
-                            break;
-                        close(fd);
-                        break;
+                        // Đã gửi cạn buffer, chỉ cần chờ đọc tiếp
+                        cev.events = EPOLLIN | EPOLLET;
+                        epoll_ctl(epollfd, EPOLL_CTL_MOD, conn->fd, &cev);
                     }
                 }
+
+            next_event:
+                continue;
             }
         }
     }
-
-    close(server_fd);
+    return 0;
 }
