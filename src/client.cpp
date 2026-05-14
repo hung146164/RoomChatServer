@@ -1,8 +1,23 @@
 #include "../header/networkcommon.h"
 
 int NUM_BOTS = 100;
-const int PORT = 8888;
-const char *SERVER_IP = "127.0.0.1";
+int PORT = 8080;
+char *SERVER_IP = "8.8.8.8";
+
+void LoadConfig()
+{
+
+    char *serverSecret = std::getenv("SERVER_IP");
+    char *portStr = std::getenv("SERVER_PORT");
+    if (serverSecret != nullptr)
+    {
+        SERVER_IP = std::getenv("SERVER_IP");
+    }
+    if (portStr != nullptr)
+    {
+        PORT = std::stoi(portStr);
+    }
+}
 void BotTask(int botId)
 {
     int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -10,7 +25,7 @@ void BotTask(int botId)
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(PORT);
-    serverAddress.sin_addr.s_addr = inet_addr("127.0.0.1");
+    serverAddress.sin_addr.s_addr = inet_addr(SERVER_IP);
 
     if (connect(clientSocket, (sockaddr *)&serverAddress, sizeof(serverAddress)) < 0)
     {
@@ -29,9 +44,10 @@ void BotTask(int botId)
             std::cerr << "[Bot " << botId << "] Connection lost.\n";
             break;
         }
-        auto end = std::chrono::high_resolution_clock::now();
+
         char buffer[1024];
         int bytesReceived = recv(clientSocket, buffer, 1024, 0);
+        auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
         std::cout << "[Bot " << botId << "] Sent " << byteSend
